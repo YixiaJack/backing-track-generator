@@ -70,7 +70,7 @@ Three separate Markov Chain models generate the backing track components:
 
 ## Musical Context
 
-- **Piece**: *Snow Dreaming* (雪中梦), original composition by JK
+- **Piece**: *Snow Dreaming* , original composition by JK
 - **Key**: D Hungarian Minor (D E F G# A Bb C# D)
 - **Tempo**: 90 BPM
 - **Style**: Trip-hop / Downtempo (Massive Attack, Portishead, Tricky lineage)
