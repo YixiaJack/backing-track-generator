@@ -1,4 +1,4 @@
-# Snow Dreaming AI Backing Track Generator
+#Backing Track Generator
 
 Generate stylistically matching backing tracks from MusicXML scores using Markov Chain models.
 
