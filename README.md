@@ -10,7 +10,7 @@
 
 A Python CLI tool that reads an existing MusicXML composition and generates a stylistically matching **trip-hop backing track** (drums, bass, ambient pad) using **Markov Chain** models — a foundational probabilistic method in machine learning.
 
-Built as a course assignment demonstrating the relationship between AI/ML and music, and as a practical tool for the original composition *Snow Dreaming* (雪中梦).
+Built as a course assignment demonstrating the relationship between AI/ML and music, and as a practical tool for the original composition *Snow Dreaming*.
 
 ---
 
