@@ -98,40 +98,34 @@ def write_midi(
         midi.addTempo(track_idx, 0, tempo)
         midi.addProgramChange(track_idx, pad_channel, 0, GM_PAD)
 
-        # Slow-evolving CC envelopes: CC11 (expression) for attack, CC1 (modulation) for texture
         beats_per_bar = time_sig_num
 
-        for bar_idx in range(pad_track.num_bars):
+        # CC envelopes per bar (expression + modulation)
+        for bar_idx in range(min(pad_track.num_bars, len(pad_track.chords))):
             bar_time = bar_idx * beats_per_bar
-            chord = pad_track.chords[bar_idx]
-            vel = pad_track.velocities[bar_idx]
-            dur = pad_track.durations[bar_idx]
 
-            # Detect chord changes (first bar or different chord from previous)
             is_chord_change = (bar_idx == 0 or
                                pad_track.chords[bar_idx] != pad_track.chords[bar_idx - 1])
 
             if is_chord_change:
-                # CC11 (expression) slow attack ramp on chord changes
                 for cc_step in range(8):
                     cc_time = bar_time + cc_step * 0.25
                     cc_val = min(127, 20 + cc_step * 14)
                     midi.addControllerEvent(track_idx, pad_channel, cc_time, 11, cc_val)
             else:
-                # Sustained bars: keep expression high
                 midi.addControllerEvent(track_idx, pad_channel, bar_time, 11, 110)
 
-            # CC1 (modulation) slow wave for texture evolution
             for cc_step in range(4):
                 cc_time = bar_time + cc_step * float(beats_per_bar) / 4
-                # Gentle sine-like modulation: 30-80 range
                 phase = (bar_idx * 4 + cc_step) * 0.15
                 cc_val = int(55 + 25 * math.sin(phase))
                 cc_val = max(0, min(127, cc_val))
                 midi.addControllerEvent(track_idx, pad_channel, cc_time, 1, cc_val)
 
-            for pitch in chord:
-                midi.addNote(track_idx, pad_channel, pitch, bar_time, dur, vel)
+        # Write individual note events (staggered, ghost re-attacks, etc.)
+        for evt in pad_track.events:
+            midi.addNote(track_idx, pad_channel, evt.pitch,
+                         max(0.0, evt.time), max(0.1, evt.duration), evt.velocity)
 
     # ── Write file ────────────────────────────────────────────────
     output_path = Path(output_path)
