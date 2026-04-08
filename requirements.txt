@@ -1,0 +1,4 @@
+music21>=9.1
+midiutil>=1.2.1
+numpy>=1.24
+click>=8.1
