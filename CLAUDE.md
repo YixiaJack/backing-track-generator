@@ -1,10 +1,10 @@
 # CLAUDE.md — Snow Dreaming AI Backing Track Generator
 
 ## Project Purpose
-A Python CLI tool that reads an existing MusicXML composition and generates a stylistically matching backing track (drums, bass, pad) using Markov Chain models. Built as a course assignment demonstrating AI/ML in music, and as a practical tool for the original composition *Snow Dreaming* (雪中梦).
+A Python CLI tool that reads an existing MusicXML composition and generates a stylistically matching backing track (drums, bass, pad) using Markov Chain models. Built as a course assignment demonstrating AI/ML in music, and as a practical tool for the original composition *Snow Dreaming* .
 
 ## Musical Context
-- **Piece**: Snow Dreaming (雪中梦), original composition by JK
+- **Piece**: Snow Dreaming, original composition by JK
 - **Key**: D Hungarian Minor (D E F G# A Bb C# D)
 - **Tempo**: 90 BPM
 - **Style**: Trip-hop / Downtempo (Massive Attack, Portishead lineage)

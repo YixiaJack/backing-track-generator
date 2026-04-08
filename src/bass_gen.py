@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional, TYPE_CHECKING
 
 import numpy as np
 
 from src.markov import build_model_from_sequences
 from src.parser import Analysis
 from src.training_data import TRIP_HOP_BASS_PATTERNS
+
+if TYPE_CHECKING:
+    from src.drum_gen import DrumTrack
 
 STEPS_PER_BAR = 16
 BASS_OCTAVE = 2  # MIDI octave for bass (C2 = 36)
@@ -28,10 +31,19 @@ def generate_bass(
     num_bars: int,
     rng: np.random.Generator,
     temperature: float = 1.0,
+    drum_track: Optional["DrumTrack"] = None,
 ) -> BassTrack:
-    """Generate a bass line from interval Markov chain, constrained to the scale."""
-    # Build interval Markov model from training patterns
-    model = build_model_from_sequences(TRIP_HOP_BASS_PATTERNS)
+    """Generate a bass line from interval Markov chain, constrained to the scale.
+
+    When drum_track is provided, bass notes are biased toward kick positions:
+    steps where the kick hits are more likely to play a note, and steps where
+    the kick is silent are more likely to rest.  This bass-kick lock is a
+    defining characteristic of trip-hop production.
+    """
+    # Build second-order interval Markov model for more coherent bass lines.
+    # Using order=2 means intervals depend on the previous two intervals,
+    # producing smoother melodic contours with automatic backoff.
+    model = build_model_from_sequences(TRIP_HOP_BASS_PATTERNS, order=2)
 
     track = BassTrack(num_bars=num_bars)
 
@@ -48,10 +60,24 @@ def generate_bass(
             length=STEPS_PER_BAR,
             rng=rng,
             temperature=temperature,
-            start=0,  # start on root
+            start=[0, -1],  # start on root then rest — typical trip-hop bass opening
         )
 
-        for interval in intervals:
+        for step_in_bar, interval in enumerate(intervals):
+            global_step = bar_idx * STEPS_PER_BAR + step_in_bar
+
+            # Bass-kick synchronisation: bias rests/notes toward kick pattern
+            if drum_track is not None and global_step < len(drum_track.kick):
+                kick_here = drum_track.kick[global_step] > 0
+                if interval == -1 and kick_here:
+                    # Kick hit but Markov chose rest → play root with 65% probability
+                    if rng.random() < 0.65:
+                        interval = 0
+                elif interval != -1 and not kick_here:
+                    # No kick but Markov chose note → convert to rest with 40% probability
+                    if rng.random() < 0.40:
+                        interval = -1
+
             if interval == -1:
                 # Rest
                 track.pitches.append(0)

@@ -65,7 +65,7 @@ def main(
 
     if not no_bass:
         click.echo(f"Generating bass line ({bars} bars, temp={temperature}) ...")
-        bass_track = generate_bass(analysis, bars, rng, temperature)
+        bass_track = generate_bass(analysis, bars, rng, temperature, drum_track=drum_track)
 
     if not no_pad:
         click.echo(f"Generating pad chords ({bars} bars) ...")

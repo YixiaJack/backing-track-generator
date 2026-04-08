@@ -1,6 +1,7 @@
 """MIDI export using midiutil — multi-track with GM instrument assignments."""
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from midiutil import MIDIFile
@@ -47,12 +48,19 @@ def write_midi(
 
         for step in range(total_steps):
             time = step * step_dur
+            # Apply micro-timing offsets for humanisation (kick late, snare early)
             if drum_track.kick[step] > 0:
-                midi.addNote(track_idx, DRUM_CHANNEL, GM_KICK, time, step_dur, drum_track.kick[step])
+                kt = drum_track.kick_timing[step] if drum_track.kick_timing else 0.0
+                midi.addNote(track_idx, DRUM_CHANNEL, GM_KICK,
+                             max(0.0, time + kt), step_dur, drum_track.kick[step])
             if drum_track.snare[step] > 0:
-                midi.addNote(track_idx, DRUM_CHANNEL, GM_SNARE, time, step_dur, drum_track.snare[step])
+                st = drum_track.snare_timing[step] if drum_track.snare_timing else 0.0
+                midi.addNote(track_idx, DRUM_CHANNEL, GM_SNARE,
+                             max(0.0, time + st), step_dur, drum_track.snare[step])
             if drum_track.hihat[step] > 0:
-                midi.addNote(track_idx, DRUM_CHANNEL, GM_HIHAT_CLOSED, time, step_dur * 0.8, drum_track.hihat[step])
+                ht = drum_track.hihat_timing[step] if drum_track.hihat_timing else 0.0
+                midi.addNote(track_idx, DRUM_CHANNEL, GM_HIHAT_CLOSED,
+                             max(0.0, time + ht), step_dur * 0.8, drum_track.hihat[step])
 
         track_idx += 1
 
@@ -90,7 +98,7 @@ def write_midi(
         midi.addTempo(track_idx, 0, tempo)
         midi.addProgramChange(track_idx, pad_channel, 0, GM_PAD)
 
-        # Add slow attack via CC (expression)
+        # Slow-evolving CC envelopes: CC11 (expression) for attack, CC1 (modulation) for texture
         beats_per_bar = time_sig_num
 
         for bar_idx in range(pad_track.num_bars):
@@ -99,11 +107,28 @@ def write_midi(
             vel = pad_track.velocities[bar_idx]
             dur = pad_track.durations[bar_idx]
 
-            # CC11 (expression) ramp for slow attack
+            # Detect chord changes (first bar or different chord from previous)
+            is_chord_change = (bar_idx == 0 or
+                               pad_track.chords[bar_idx] != pad_track.chords[bar_idx - 1])
+
+            if is_chord_change:
+                # CC11 (expression) slow attack ramp on chord changes
+                for cc_step in range(8):
+                    cc_time = bar_time + cc_step * 0.25
+                    cc_val = min(127, 20 + cc_step * 14)
+                    midi.addControllerEvent(track_idx, pad_channel, cc_time, 11, cc_val)
+            else:
+                # Sustained bars: keep expression high
+                midi.addControllerEvent(track_idx, pad_channel, bar_time, 11, 110)
+
+            # CC1 (modulation) slow wave for texture evolution
             for cc_step in range(4):
-                cc_time = bar_time + cc_step * 0.25
-                cc_val = min(127, 30 + cc_step * 32)
-                midi.addControllerEvent(track_idx, pad_channel, cc_time, 11, cc_val)
+                cc_time = bar_time + cc_step * float(beats_per_bar) / 4
+                # Gentle sine-like modulation: 30-80 range
+                phase = (bar_idx * 4 + cc_step) * 0.15
+                cc_val = int(55 + 25 * math.sin(phase))
+                cc_val = max(0, min(127, cc_val))
+                midi.addControllerEvent(track_idx, pad_channel, cc_time, 1, cc_val)
 
             for pitch in chord:
                 midi.addNote(track_idx, pad_channel, pitch, bar_time, dur, vel)
