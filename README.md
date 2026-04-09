@@ -12,6 +12,8 @@ A Python CLI tool that reads an existing MusicXML composition and generates a st
 
 Built as a course assignment demonstrating the relationship between AI/ML and music, and as a practical tool for the original composition *Snow Dreaming*.
 
+see here for full music with backing track: https://soundcloud.com/yixia-yu/snow-dreaming?si=f44d6b5481464754bf00ac1d8c87f660&utm_source=clipboard&utm_medium=text&utm_campaign=social_sharing
+
 ---
 
 ## Assignment Response
