@@ -352,39 +352,58 @@ def _build_voicing(
     root_pc: int, quality: str, scale_pcs: Set[int],
     rng: np.random.Generator, intensity: float,
 ) -> List[int]:
-    """Build a pad voicing in the natural pad register (octave 3-4, MIDI 48-72).
+    """Build a spread pad voicing in the sweet-spot register (C3–C5, MIDI 48–72).
 
-    Octave 3 (C3=48) sits warmly below most melodies without sounding muddy.
-    At high intensity extends up to octave 4; at low intensity stays in octave 3.
-    Consonance is enforced separately by _filter_consonant().
+    Rules (from Berklee "Writing String Pads" & orchestration best practices):
+    - Root sits in C3–G3 (MIDI 48–55), never below G2 (43)
+    - Guide tones (3rd, 7th) stay above G2 (43)
+    - Low register (below C3): only root + fifth, no 3rd
+    - Upper voices spread up to C5 (72) — not clustered in one octave
+    - High intensity: thicker spread up to C5; Low: thin root+fifth in octave 3
     """
-    # Root in octave 3 (MIDI 48-59) — the "warm pad" sweet spot
+    # Root in octave 3 (C3=48 to B3=59)
     base = 3 * 12 + root_pc  # e.g. D3 = 50
+    third = 3 if quality == "min" else 4
 
     if intensity > 0.75:
-        # Climax: thicker, extends into octave 4
-        if rng.random() < 0.5:
-            intervals = [0, 3 if quality == "min" else 4, 7, 12]
+        # Climax: spread voicing across octave 3–4 (up to C5=72)
+        roll = rng.random()
+        if roll < 0.4:
+            # Root in oct3, 5th in oct3, 3rd in oct4, octave in oct4
+            intervals = [0, 7, 12 + third, 12 + 7]
+        elif roll < 0.7:
+            # Root in oct3, 3rd in oct3, 5th+oct in oct4
+            intervals = [0, third, 12 + 7, 24]
         else:
-            intervals = [0, 7, 12, 15 if quality == "min" else 16]
+            # Root in oct3, 5th in oct3, oct in oct4, 10th in oct4
+            intervals = [0, 7, 12, 12 + third]
     elif intensity < 0.3:
-        # Calm: thin, stay in octave 3
+        # Calm: root + fifth only in octave 3 (thin, open)
         if rng.random() < 0.5:
-            intervals = [0, 7]       # root + fifth only
+            intervals = [0, 7]            # root + fifth
         else:
-            intervals = [0, 7, 12]   # root, fifth, octave
+            intervals = [0, 7, 12]        # root, fifth, octave
     else:
-        # Medium: standard triad
-        if rng.random() < 0.3:
-            intervals = [0, 3 if quality == "min" else 4, 7]
+        # Medium: spread triad — root in oct3, 3rd or 5th up in oct4
+        roll = rng.random()
+        if roll < 0.4:
+            intervals = [0, 7, 12 + third]       # root, 5th, 10th
+        elif roll < 0.7:
+            intervals = [0, third, 7, 12]         # close triad + octave
         else:
-            intervals = [0, 3 if quality == "min" else 4, 7, 12]
+            intervals = [0, 7, 12, 12 + third]   # root, 5th, oct, 10th
 
     pitches = []
     for iv in intervals:
         p = base + iv
         p = _snap_to_scale(p, scale_pcs)
-        pitches.append(p)
+        # Enforce range: floor=G2(43), ceiling=C5(72)
+        if 43 <= p <= 72:
+            pitches.append(p)
+
+    # Ensure at least root is present
+    if not pitches:
+        pitches = [max(48, _snap_to_scale(base, scale_pcs))]
 
     return sorted(set(pitches))
 
