@@ -38,6 +38,10 @@ class Analysis:
     chord_progression: List[Tuple[int, str]] = field(default_factory=list)  # (root_pc, quality) per measure
     intensity_curve: List[float] = field(default_factory=list)    # 0.0–1.0 per measure, composite intensity
 
+    # Phrase & section structure (filled by analyzer)
+    phrase_boundaries: List[int] = field(default_factory=list)     # measure indices where phrases start
+    section_labels: List[str] = field(default_factory=list)        # per-measure section label: "intro", "verse", "chorus", "bridge", "outro"
+
 
 def parse_musicxml(path: Path) -> Analysis:
     """Parse a MusicXML / .mxl file and return a raw Analysis object."""

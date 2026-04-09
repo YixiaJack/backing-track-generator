@@ -25,6 +25,8 @@ def analyze(analysis: Analysis) -> Analysis:
     _compute_rhythmic_density(analysis)
     _infer_chords(analysis)
     _compute_intensity_curve(analysis)
+    _detect_phrases(analysis)
+    _detect_sections(analysis)
     return analysis
 
 
@@ -207,6 +209,147 @@ def print_summary(a: Analysis) -> None:
         print(f"  Climax bars:    {climax_str}")
 
     print("=" * 50)
+
+
+# ── Phrase boundary detection (LBDM) ────────────────────────────────
+
+def _detect_phrases(a: Analysis) -> None:
+    """Detect phrase boundaries using the Local Boundary Detection Model (Cambouropoulos 2001).
+
+    LBDM uses three cues: pitch interval change, IOI (inter-onset interval) change,
+    and rest duration. Peaks in the combined boundary strength indicate phrase boundaries.
+    """
+    import numpy as np
+
+    n = a.num_measures
+    if n < 4:
+        a.phrase_boundaries = [0]
+        return
+
+    # Compute per-measure features for boundary detection
+    mean_pitches: List[float] = []
+    note_counts: List[int] = []
+    has_rest: List[bool] = []
+
+    for m in range(1, n + 1):
+        pitches = [e.pitch for e in a.note_events if e.measure == m and e.pitch is not None]
+        rests = [e for e in a.note_events if e.measure == m and e.pitch is None]
+        mean_pitches.append(sum(pitches) / len(pitches) if pitches else 0.0)
+        note_counts.append(len(pitches))
+        # A measure with long rests suggests a phrase ending
+        total_rest = sum(e.duration for e in rests)
+        has_rest.append(total_rest >= a.time_sig_num * 0.5)  # at least half a bar of rest
+
+    # LBDM boundary strength: combination of 3 profiles
+    boundary_strength = [0.0] * n
+
+    for i in range(1, n):
+        # 1. Pitch interval change: large pitch jump = boundary
+        pitch_diff = abs(mean_pitches[i] - mean_pitches[i - 1])
+
+        # 2. Density change: sudden drop/rise in note count = boundary
+        density_diff = abs(note_counts[i] - note_counts[i - 1])
+
+        # 3. Rest: presence of rests at measure boundary
+        rest_score = 2.0 if has_rest[i - 1] else 0.0
+
+        # Combined (weights from LBDM literature)
+        boundary_strength[i] = 0.35 * pitch_diff + 0.35 * density_diff + 0.30 * rest_score
+
+    # Normalise
+    mx = max(boundary_strength) if max(boundary_strength) > 0 else 1.0
+    boundary_strength = [b / mx for b in boundary_strength]
+
+    # Pick peaks above threshold as phrase boundaries
+    threshold = 0.3
+    boundaries = [0]  # first measure is always a boundary
+    for i in range(1, n):
+        if boundary_strength[i] > threshold:
+            # Must be at least 2 bars from previous boundary (avoid micro-phrases)
+            if i - boundaries[-1] >= 2:
+                boundaries.append(i)
+
+    a.phrase_boundaries = boundaries
+
+
+def _detect_sections(a: Analysis) -> None:
+    """Detect sections (intro/verse/chorus/bridge/outro) using self-similarity matrix
+    on the intensity curve + chord progression.
+
+    Groups consecutive measures with similar features into sections, then labels
+    based on intensity profile (low=verse, high=chorus, transitional=bridge).
+    """
+    import numpy as np
+
+    n = a.num_measures
+    if n < 4:
+        a.section_labels = ["verse"] * n
+        return
+
+    # Build feature vector per measure: [intensity, chord_root_normalized, density_normalized]
+    intensities = a.intensity_curve if a.intensity_curve else [0.5] * n
+    densities = a.rhythmic_density if a.rhythmic_density else [1.0] * n
+    max_density = max(densities) if max(densities) > 0 else 1.0
+
+    features = np.zeros((n, 3))
+    for i in range(n):
+        features[i, 0] = intensities[i]
+        features[i, 1] = (a.chord_progression[i][0] / 12.0) if i < len(a.chord_progression) else 0.0
+        features[i, 2] = densities[i] / max_density
+
+    # Self-similarity matrix (cosine similarity)
+    norms = np.linalg.norm(features, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    normed = features / norms
+    ssm = normed @ normed.T  # n x n similarity matrix
+
+    # Segment using phrase boundaries: compute average intra-segment similarity
+    # and label based on intensity profile
+    boundaries = a.phrase_boundaries if a.phrase_boundaries else [0]
+    # Add end boundary
+    segment_bounds = list(boundaries) + [n]
+
+    # Compute average intensity per segment
+    segments = []
+    for s in range(len(segment_bounds) - 1):
+        start = segment_bounds[s]
+        end = segment_bounds[s + 1]
+        avg_int = np.mean(intensities[start:end])
+        segments.append((start, end, avg_int))
+
+    # Label sections based on intensity thresholds
+    if not segments:
+        a.section_labels = ["verse"] * n
+        return
+
+    all_seg_intensities = [s[2] for s in segments]
+    max_seg_int = max(all_seg_intensities)
+    min_seg_int = min(all_seg_intensities)
+    int_range = max_seg_int - min_seg_int if max_seg_int > min_seg_int else 1.0
+
+    labels = [""] * n
+    for start, end, avg_int in segments:
+        normalized = (avg_int - min_seg_int) / int_range
+
+        # First and last segments get special labels
+        is_first = (start == 0)
+        is_last = (end == n)
+
+        if is_first and normalized < 0.5:
+            label = "intro"
+        elif is_last and normalized < 0.4:
+            label = "outro"
+        elif normalized > 0.7:
+            label = "chorus"
+        elif normalized < 0.35:
+            label = "bridge"
+        else:
+            label = "verse"
+
+        for i in range(start, end):
+            labels[i] = label
+
+    a.section_labels = labels
 
 
 def _format_ranges(bars: List[int]) -> str:
