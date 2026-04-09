@@ -1,13 +1,11 @@
-"""Chord-based ambient pad generation with voice leading, staggered entry,
-intensity-aware dynamics, register separation, and consonance validation.
+"""Chord-based ambient pad generation — trip-hop / downtempo style.
 
-Key fixes based on research:
-- Register: pad placed BELOW melody range (Berklee "Writing String Pads" rule)
-- Consonance: pad notes validated against per-measure melody pitch classes
-  (consonance scoring from AutoHarmonizer / Automatic Melody Harmonization papers)
-- Dynamics: full ppp–fff range (MIDI vel 20–120) driven by intensity curve
-  (MIDI velocity mapping: Apple Logic Pro standard)
-- Scale: uses auto-detected scale from actual pitch histogram, not hardcoded
+Redesigned for warmth and atmosphere:
+- Register: C3–C4 (MIDI 48–64), below melody, warm and dark
+- Voicings: open voicings with 7ths/9ths, drop-2 style
+- Voice leading: minimal movement between chords
+- Dynamics: gentle, sustained, less randomness
+- Trip-hop aesthetic: sparser at high intensity, longer holds
 """
 from __future__ import annotations
 
@@ -19,7 +17,7 @@ import numpy as np
 
 from src.parser import Analysis
 
-# ── MIDI dynamic marks (Apple Logic Pro 9 standard) ──────────────────
+# ── MIDI dynamic marks ──────────────────────────────────────────
 VEL_PPP = 20
 VEL_PP = 35
 VEL_P = 50
@@ -28,9 +26,6 @@ VEL_MF = 80
 VEL_F = 96
 VEL_FF = 112
 VEL_FFF = 120
-
-# Consonant intervals from root (in semitones)
-_CONSONANT_INTERVALS = {0, 3, 4, 5, 7, 8, 9, 12, 15, 16}  # unison, m3, M3, P4, P5, m6, M6, oct, ...
 
 
 @dataclass
@@ -67,9 +62,6 @@ def generate_pad(
     track = PadTrack(num_bars=num_bars, beats_per_bar=beats_per_bar)
     intensities = _get_intensity_per_bar(analysis, num_bars)
 
-    # Collect melody pitch classes per measure for consonance checking
-    melody_pcs_per_bar = _get_melody_pcs_per_bar(analysis, num_bars)
-
     prev_voicing: List[int] = []
     bar_idx = 0
 
@@ -77,37 +69,34 @@ def generate_pad(
         root_pc, quality = _get_chord_for_bar(analysis, bar_idx)
         avg_intensity = _avg_intensity(intensities, bar_idx, num_bars)
 
-        # Hold duration adapts to intensity
-        min_hold = 1 if avg_intensity > 0.7 else 2
-        max_hold = 2 if avg_intensity > 0.7 else (4 if avg_intensity < 0.3 else 3)
-        hold_bars = int(rng.integers(min_hold, max_hold + 1))
+        # Trip-hop: hold LONGER at high intensity (anchor), change more at low
+        if avg_intensity > 0.7:
+            hold_bars = int(rng.integers(3, 5))   # 3-4 bars, stable
+        elif avg_intensity < 0.3:
+            hold_bars = int(rng.integers(1, 3))   # 1-2 bars, evolving
+        else:
+            hold_bars = int(rng.integers(2, 4))   # 2-3 bars
         hold_bars = min(hold_bars, num_bars - bar_idx)
 
-            # Build voicing in natural pad register (octave 3-4)
-        # Consonance filter (below) handles dissonance — no need to force register down
-        raw_voicing = _build_voicing(
-            root_pc, quality, scale_pcs, rng, avg_intensity
-        )
+        # Build voicing in warm register (C3–C4)
+        voicing = _build_voicing(root_pc, quality, scale_pcs, rng, avg_intensity)
 
-        # Consonance check: filter out notes that clash with melody
-        mel_pcs = set()
-        for b in range(bar_idx, min(bar_idx + hold_bars, len(melody_pcs_per_bar))):
-            mel_pcs |= melody_pcs_per_bar[b]
-        voicing = _filter_consonant(raw_voicing, mel_pcs, scale_pcs)
+        # Gentle consonance: only remove harsh semitone clashes
+        melody_pcs = set()
+        for b in range(bar_idx, min(bar_idx + hold_bars, num_bars)):
+            melody_pcs |= _get_melody_pcs_for_bar(analysis, b)
+        voicing = _filter_gentle(voicing, melody_pcs, scale_pcs)
 
-        # Voice leading
-        if prev_voicing and len(prev_voicing) == len(voicing):
+        # Voice leading: minimize movement from previous chord
+        if prev_voicing:
             voicing = _voice_lead(prev_voicing, voicing)
 
         if not voicing:
             bar_idx += hold_bars
             continue
 
-        # Emit events
-        _emit_chord_hold(
-            track, voicing, bar_idx, hold_bars, beats_per_bar,
-            rng, scale_pcs, intensities,
-        )
+        # Emit sustained notes
+        _emit_sustained(track, voicing, bar_idx, hold_bars, beats_per_bar, rng, intensities)
 
         prev_voicing = voicing
         bar_idx += hold_bars
@@ -115,295 +104,58 @@ def generate_pad(
     return track
 
 
-# ── Melody analysis helpers ──────────────────────────────────────────
-
-def _get_melody_floor_per_bar(analysis: Analysis, num_bars: int) -> List[int]:
-    """Get the lowest melody pitch per output bar (for register separation)."""
-    floors: List[int] = []
-    for i in range(num_bars):
-        src_m = int(i * analysis.num_measures / num_bars) % analysis.num_measures + 1
-        pitches = [e.pitch for e in analysis.note_events
-                   if e.measure == src_m and e.pitch is not None]
-        floors.append(min(pitches) if pitches else 60)
-    return floors
-
-
-def _get_melody_pcs_per_bar(analysis: Analysis, num_bars: int) -> List[Set[int]]:
-    """Get the set of melody pitch classes per output bar (for consonance checking)."""
-    result: List[Set[int]] = []
-    for i in range(num_bars):
-        src_m = int(i * analysis.num_measures / num_bars) % analysis.num_measures + 1
-        pcs = {e.pitch % 12 for e in analysis.note_events
-               if e.measure == src_m and e.pitch is not None}
-        result.append(pcs)
-    return result
-
-
-# ── Consonance validation ────────────────────────────────────────────
-
-def _filter_consonant(
-    voicing: List[int], melody_pcs: Set[int], scale_pcs: Set[int]
-) -> List[int]:
-    """Remove pad notes that are dissonant against the melody.
-
-    A pad note is kept if:
-    1. Its pitch class is IN the melody (chord tone), OR
-    2. Its interval to at least one melody note is consonant (3rd, 5th, 6th, octave), OR
-    3. Its pitch class is in the scale AND not a semitone away from any melody note
-
-    Based on consonance scoring from Automatic Melody Harmonization (Yeh et al., 2021).
-    """
-    if not melody_pcs:
-        return voicing
-
-    result: List[int] = []
-    for p in voicing:
-        pc = p % 12
-        # Rule 1: pad note is a melody tone → always consonant
-        if pc in melody_pcs:
-            result.append(p)
-            continue
-
-        # Rule 2: check intervals against each melody PC
-        consonant = False
-        for m_pc in melody_pcs:
-            interval = abs(pc - m_pc) % 12
-            if interval in _CONSONANT_INTERVALS:
-                consonant = True
-                break
-        if consonant:
-            result.append(p)
-            continue
-
-        # Rule 3: in scale and not a semitone from melody → weak consonance, keep
-        if pc in scale_pcs:
-            semitone_clash = any(abs(pc - m_pc) % 12 in (1, 11) for m_pc in melody_pcs)
-            if not semitone_clash:
-                result.append(p)
-
-    # Ensure we keep at least the root
-    if not result and voicing:
-        result = [voicing[0]]
-
-    return result
-
-
-# ── Voice leading ────────────────────────────────────────────────────
-
-def _voice_lead(prev: List[int], target: List[int]) -> List[int]:
-    """Move each voice to nearest pitch in target's pitch-class set (Tymoczko 2006)."""
-    target_pcs = [p % 12 for p in target]
-    result: List[int] = []
-
-    for prev_pitch in prev:
-        best_pitch = prev_pitch
-        best_dist = 999
-        for offset in range(-6, 7):
-            candidate = prev_pitch + offset
-            if candidate % 12 in target_pcs:
-                if abs(offset) < best_dist:
-                    best_dist = abs(offset)
-                    best_pitch = candidate
-        result.append(best_pitch)
-
-    seen = set()
-    for i, p in enumerate(result):
-        while p in seen:
-            p += 12
-        seen.add(p)
-        result[i] = p
-
-    return sorted(result)
-
-
-# ── Chord hold emission ─────────────────────────────────────────────
-
-def _emit_chord_hold(
-    track: PadTrack,
-    voicing: List[int],
-    start_bar: int,
-    hold_bars: int,
-    beats_per_bar: int,
-    rng: np.random.Generator,
-    scale_pcs: Set[int],
-    intensities: List[float],
-) -> None:
-    """Emit note events for a chord hold with full dynamic range."""
-    num_voices = len(voicing)
-
-    vel_phases = [rng.uniform(0, 2 * math.pi) for _ in range(num_voices)]
-    vel_period = rng.uniform(3.0, 6.0)
-
-    for hold_i in range(hold_bars):
-        current_bar = start_bar + hold_i
-        current_bar_time = current_bar * beats_per_bar
-        is_first_bar = (hold_i == 0)
-        is_last_bar = (hold_i == hold_bars - 1)
-
-        bar_intensity = intensities[current_bar] if current_bar < len(intensities) else 0.5
-
-        # Tone subtraction
-        active_voices = list(range(num_voices))
-        if not is_first_bar and num_voices >= 3:
-            drop_prob = 0.25 - bar_intensity * 0.20
-            if rng.random() < drop_prob:
-                drop_idx = int(rng.integers(1, num_voices))
-                active_voices = [v for v in active_voices if v != drop_idx]
-
-        # Tension tone addition
-        extra_pitch = None
-        tension_prob = 0.03 + bar_intensity * 0.22
-        if not is_first_bar and rng.random() < tension_prob:
-            root = voicing[0]
-            tension_intervals = [14, 17, 10]
-            iv = tension_intervals[int(rng.integers(len(tension_intervals)))]
-            candidate = root + iv
-            candidate = _snap_to_scale(candidate, scale_pcs)
-            if candidate not in voicing:
-                extra_pitch = candidate
-
-        for voice_idx in active_voices:
-            pitch = voicing[voice_idx]
-
-            # Staggered entry
-            if is_first_bar:
-                stagger_lo = 0.25 - bar_intensity * 0.20
-                stagger_hi = 0.45 - bar_intensity * 0.30
-                stagger = voice_idx * rng.uniform(max(0.03, stagger_lo), max(0.05, stagger_hi))
-                note_start = current_bar_time + stagger
-                note_dur = float(beats_per_bar) - stagger - 0.05
-            else:
-                note_start = current_bar_time
-                note_dur = float(beats_per_bar) - 0.05
-
-            if is_last_bar:
-                release_offset = (num_voices - 1 - voice_idx) * rng.uniform(0.1, 0.25)
-                note_dur -= release_offset
-
-            note_dur = max(0.5, note_dur)
-
-            # ── Full dynamic range velocity (ppp=20 to fff=120) ──────
-            phase = vel_phases[voice_idx]
-            lfo_pos = (hold_i / max(hold_bars, 1)) * vel_period * 2 * math.pi + phase
-            lfo_val = int(10 * math.sin(lfo_pos))
-
-            # intensity 0.0 → ppp(20), 0.5 → mp(64), 1.0 → fff(120)
-            vel_target = int(VEL_PPP + (VEL_FFF - VEL_PPP) * bar_intensity)
-            vel = vel_target + lfo_val + hold_i * 2
-            vel = max(VEL_PPP, min(VEL_FFF, vel + int(rng.integers(-5, 6))))
-
-            track.events.append(PadNoteEvent(
-                pitch=pitch, time=note_start, duration=note_dur, velocity=vel,
-            ))
-
-        # Extra tension tone
-        if extra_pitch is not None:
-            t_start = current_bar_time + rng.uniform(0.5, 2.0)
-            t_dur = rng.uniform(1.5, float(beats_per_bar) - 0.5)
-            t_vel = max(VEL_PPP, min(VEL_MF, int(VEL_PP + (VEL_MF - VEL_PP) * bar_intensity) + int(rng.integers(-5, 6))))
-            track.events.append(PadNoteEvent(
-                pitch=extra_pitch, time=t_start, duration=t_dur, velocity=t_vel,
-            ))
-
-        # Ghost re-attacks
-        ghost_prob = 0.15 + bar_intensity * 0.45
-        if not is_first_bar and rng.random() < ghost_prob:
-            ghost_voice = int(rng.integers(num_voices))
-            ghost_pitch = voicing[ghost_voice]
-            ghost_beat = rng.choice([1.0, 2.0, 2.5])
-            ghost_time = current_bar_time + ghost_beat + rng.uniform(-0.05, 0.05)
-            gv_lo = max(VEL_PPP, int(VEL_PPP + 10 * bar_intensity))
-            gv_hi = max(gv_lo + 5, int(VEL_P + 10 * bar_intensity))
-            ghost_vel = int(rng.integers(gv_lo, gv_hi + 1))
-            ghost_dur = rng.uniform(0.5, 1.5)
-
-            track.events.append(PadNoteEvent(
-                pitch=ghost_pitch, time=ghost_time, duration=ghost_dur,
-                velocity=ghost_vel, is_ghost=True,
-            ))
-
-            if bar_intensity > 0.8 and rng.random() < 0.40:
-                g2_voice = (ghost_voice + 1) % num_voices
-                g2_pitch = voicing[g2_voice]
-                g2_beat = rng.choice([1.5, 3.0, 3.5])
-                g2_time = current_bar_time + g2_beat + rng.uniform(-0.05, 0.05)
-                g2_vel = int(rng.integers(gv_lo, gv_hi + 1))
-                track.events.append(PadNoteEvent(
-                    pitch=g2_pitch, time=g2_time, duration=rng.uniform(0.3, 1.0),
-                    velocity=g2_vel, is_ghost=True,
-                ))
-
-        # Legacy fields
-        track.chords.append(voicing[:])
-        track.velocities.append(vel if active_voices else VEL_MP)
-        track.durations.append(float(beats_per_bar))
-
-
-# ── Voicing construction (below melody) ──────────────────────────────
-
-def _get_chord_for_bar(analysis: Analysis, bar_idx: int) -> Tuple[int, str]:
-    if not analysis.chord_progression:
-        return (2, "min")
-    src_idx = bar_idx % len(analysis.chord_progression)
-    return analysis.chord_progression[src_idx]
-
+# ── Voicing construction (warm low register) ───────────────────
 
 def _build_voicing(
     root_pc: int, quality: str, scale_pcs: Set[int],
     rng: np.random.Generator, intensity: float,
 ) -> List[int]:
-    """Build a spread pad voicing in the sweet-spot register (C3–C5, MIDI 48–72).
+    """Build a warm pad voicing in C3–C4 range (MIDI 48–64).
 
-    Rules (from Berklee "Writing String Pads" & orchestration best practices):
-    - Root sits in C3–G3 (MIDI 48–55), never below G2 (43)
-    - Guide tones (3rd, 7th) stay above G2 (43)
-    - Low register (below C3): only root + fifth, no 3rd
-    - Upper voices spread up to C5 (72) — not clustered in one octave
-    - High intensity: thicker spread up to C5; Low: thin root+fifth in octave 3
+    Uses open voicings with extensions (7ths, 9ths) for trip-hop atmosphere.
+    Sparser at high intensity (trip-hop aesthetic).
     """
-    # Root in octave 3 (C3=48 to B3=59)
-    base = 3 * 12 + root_pc  # e.g. D3 = 50
+    # Root in octave 3 (C3=48)
+    base = 48 + root_pc
     third = 3 if quality == "min" else 4
+    seventh = 10 if quality == "min" else 11  # minor 7th / major 7th
 
-    if intensity > 0.75:
-        # Climax: spread voicing across octave 3–4 (up to C5=72)
+    if intensity > 0.7:
+        # High intensity: sparse — root + fifth only, dark and open
         roll = rng.random()
-        if roll < 0.4:
-            # Root in oct3, 5th in oct3, 3rd in oct4, octave in oct4
-            intervals = [0, 7, 12 + third, 12 + 7]
-        elif roll < 0.7:
-            # Root in oct3, 3rd in oct3, 5th+oct in oct4
-            intervals = [0, third, 12 + 7, 24]
+        if roll < 0.5:
+            intervals = [0, 7]              # root + P5
         else:
-            # Root in oct3, 5th in oct3, oct in oct4, 10th in oct4
-            intervals = [0, 7, 12, 12 + third]
+            intervals = [0, 7, 12]          # root + P5 + octave
     elif intensity < 0.3:
-        # Calm: root + fifth only in octave 3 (thin, open)
-        if rng.random() < 0.5:
-            intervals = [0, 7]            # root + fifth
+        # Low intensity: richer — add 7th or 9th for color
+        roll = rng.random()
+        if roll < 0.35:
+            intervals = [0, third, 7, seventh]          # full 7th chord
+        elif roll < 0.65:
+            intervals = [0, 7, seventh, 12 + 2]         # root, 5th, 7th, 9th (drop-2)
         else:
-            intervals = [0, 7, 12]        # root, fifth, octave
+            intervals = [0, third, 7, 12 + 2]           # root, 3rd, 5th, 9th
     else:
-        # Medium: spread triad — root in oct3, 3rd or 5th up in oct4
+        # Medium: triad + occasional 7th
         roll = rng.random()
         if roll < 0.4:
-            intervals = [0, 7, 12 + third]       # root, 5th, 10th
+            intervals = [0, third, 7]                    # simple triad
         elif roll < 0.7:
-            intervals = [0, third, 7, 12]         # close triad + octave
+            intervals = [0, seventh, 12 + third]         # root, 7th, 10th (open)
         else:
-            intervals = [0, 7, 12, 12 + third]   # root, 5th, oct, 10th
+            intervals = [0, third, 7, seventh]           # 7th chord
 
     pitches = []
     for iv in intervals:
         p = base + iv
         p = _snap_to_scale(p, scale_pcs)
-        # Enforce range: floor=G2(43), ceiling=C5(72)
-        if 43 <= p <= 72:
+        # Enforce warm range: C3(48) to E4(64)
+        if 45 <= p <= 64:
             pitches.append(p)
 
-    # Ensure at least root is present
     if not pitches:
-        pitches = [max(48, _snap_to_scale(base, scale_pcs))]
+        pitches = [_snap_to_scale(base, scale_pcs)]
 
     return sorted(set(pitches))
 
@@ -416,6 +168,150 @@ def _snap_to_scale(pitch: int, scale_pcs: Set[int]) -> int:
         if (pc + off) % 12 in scale_pcs:
             return pitch + off
     return pitch
+
+
+# ── Gentle consonance filter ───────────────────────────────────
+
+def _filter_gentle(
+    voicing: List[int], melody_pcs: Set[int], scale_pcs: Set[int]
+) -> List[int]:
+    """Only remove notes that create harsh semitone clashes with melody.
+
+    Keeps diatonic dissonance (2nds, tritones) for atmospheric color.
+    Much less aggressive than before — preserves chord richness.
+    """
+    if not melody_pcs:
+        return voicing
+
+    result: List[int] = []
+    for p in voicing:
+        pc = p % 12
+        # Only reject if semitone (1 or 11) away from a melody note AND not in scale
+        semitone_clash = any(abs(pc - m_pc) % 12 in (1, 11) for m_pc in melody_pcs)
+        if semitone_clash and pc not in scale_pcs:
+            continue
+        result.append(p)
+
+    # Always keep at least root + one other note
+    if len(result) < 2 and len(voicing) >= 2:
+        result = voicing[:2]
+    elif not result:
+        result = [voicing[0]]
+
+    return result
+
+
+# ── Voice leading ──────────────────────────────────────────────
+
+def _voice_lead(prev: List[int], target: List[int]) -> List[int]:
+    """Move each voice to nearest pitch in target's pitch-class set.
+
+    Prioritizes common tones (no movement) and stepwise motion.
+    """
+    target_pcs = [p % 12 for p in target]
+
+    # If different number of voices, just use target directly
+    if len(prev) != len(target):
+        return target
+
+    result: List[int] = []
+    for prev_pitch in prev:
+        best_pitch = prev_pitch
+        best_dist = 999
+        # Check common tone first
+        if prev_pitch % 12 in target_pcs:
+            result.append(prev_pitch)
+            continue
+        # Find nearest target pitch class
+        for offset in range(-7, 8):
+            candidate = prev_pitch + offset
+            if candidate % 12 in target_pcs and 45 <= candidate <= 64:
+                if abs(offset) < best_dist:
+                    best_dist = abs(offset)
+                    best_pitch = candidate
+        result.append(best_pitch)
+
+    # Remove duplicates while preserving order
+    seen = set()
+    unique = []
+    for p in result:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+
+    return sorted(unique)
+
+
+# ── Sustained note emission ────────────────────────────────────
+
+def _emit_sustained(
+    track: PadTrack,
+    voicing: List[int],
+    start_bar: int,
+    hold_bars: int,
+    beats_per_bar: int,
+    rng: np.random.Generator,
+    intensities: List[float],
+) -> None:
+    """Emit long sustained notes — minimal articulation, smooth and continuous.
+
+    Trip-hop pads: long notes, gentle velocity, subtle swell, no busy re-attacks.
+    """
+    total_duration = hold_bars * beats_per_bar
+    start_time = start_bar * beats_per_bar
+    bar_intensity = intensities[start_bar] if start_bar < len(intensities) else 0.5
+
+    # Velocity: warm range, not too loud, not too soft
+    # intensity 0→mp(64), 0.5→mf(80), 1.0→f(96)
+    base_vel = int(VEL_MP + (VEL_F - VEL_MP) * bar_intensity)
+
+    for i, pitch in enumerate(voicing):
+        # Gentle stagger on chord changes: 0.0 to 0.3 beats max
+        stagger = i * rng.uniform(0.05, 0.15)
+        note_start = start_time + stagger
+        note_dur = total_duration - stagger - 0.1  # slight gap before next chord
+
+        # Per-voice velocity: subtle variation only
+        vel = base_vel + int(rng.integers(-4, 5))
+        vel = max(VEL_P, min(VEL_F, vel))
+
+        track.events.append(PadNoteEvent(
+            pitch=pitch, time=note_start, duration=max(0.5, note_dur), velocity=vel,
+        ))
+
+    # One subtle ghost re-attack per hold (low probability, gentle)
+    if hold_bars >= 3 and rng.random() < 0.25:
+        ghost_bar = start_bar + int(rng.integers(1, hold_bars))
+        ghost_time = ghost_bar * beats_per_bar + rng.uniform(0.5, 1.5)
+        ghost_pitch = voicing[int(rng.integers(len(voicing)))]
+        ghost_vel = max(VEL_PPP, base_vel - 25 + int(rng.integers(-3, 4)))
+        track.events.append(PadNoteEvent(
+            pitch=ghost_pitch, time=ghost_time,
+            duration=rng.uniform(1.0, 2.0), velocity=ghost_vel, is_ghost=True,
+        ))
+
+    # Legacy fields for CC envelopes in midi_writer
+    for h in range(hold_bars):
+        track.chords.append(voicing[:])
+        track.velocities.append(base_vel)
+        track.durations.append(float(beats_per_bar))
+
+
+# ── Helpers ────────────────────────────────────────────────────
+
+def _get_chord_for_bar(analysis: Analysis, bar_idx: int) -> Tuple[int, str]:
+    if not analysis.chord_progression:
+        return (2, "min")
+    src_idx = bar_idx % len(analysis.chord_progression)
+    return analysis.chord_progression[src_idx]
+
+
+def _get_melody_pcs_for_bar(analysis: Analysis, bar_idx: int) -> Set[int]:
+    """Get melody pitch classes for a given bar."""
+    num_bars = analysis.num_measures
+    src_m = bar_idx % num_bars + 1
+    return {e.pitch % 12 for e in analysis.note_events
+            if e.measure == src_m and e.pitch is not None}
 
 
 def _get_intensity_per_bar(analysis: Analysis, num_bars: int) -> List[float]:
